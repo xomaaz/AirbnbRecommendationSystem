@@ -77,6 +77,7 @@ class Neo4jManager:
         MATCH (l:Listing)
         WHERE point.distance(point({latitude: l.latitude, longitude: l.longitude}), point({latitude: 30.2672, longitude: -97.7431})) < 5000
         RETURN l.name AS listing_name, l.latitude AS latitude, l.longitude AS longitude
+        limit 10
         """
 
         host_similarity_analysis_query = """
@@ -117,6 +118,56 @@ class Neo4jManager:
             "geospatial_analysis": geospatial_analysis,
             "host_similarity_analysis": host_similarity_analysis,
         }
+    
+    # Function to detect communities
+    def detect_communities(self):
+
+        # projection_query = """
+        # CALL gds.graph.project(
+        # 'users_community_projection',
+        # ['User'],
+        # {
+        #     WROTE: {
+        #     type: 'WROTE',
+        #     orientation: 'NATURAL'
+        #     }
+        # }
+        # )
+        # """
+        # self.run_query(projection_query)  # Create the projection
+
+        community_query = """
+        CALL gds.louvain.stream('users_community_projection')
+        YIELD nodeId, communityId
+        RETURN gds.util.asNode(nodeId).name AS user_name, communityId
+        ORDER BY communityId
+        LIMIT 10  
+        """
+        return self.run_query(community_query)
+    
+    # PageRank for centrality
+    def get_pageRank(self):
+
+        # projection_query = """
+        # CALL gds.graph.project(
+        #   'pagerank_graph',
+        #   ['User', 'Listing'], 
+        #   {
+        #     'HOSTS': { orientation: 'UNDIRECTED' },
+        #     'WROTE': { orientation: 'NATURAL' }
+        #   }
+        # )
+        # """
+        # self.run_query(projection_query)  
+
+        pagerank_query = """
+        CALL gds.pageRank.stream('pagerank_graph')
+        YIELD nodeId, score
+        RETURN gds.util.asNode(nodeId).name AS name, score AS pageRank
+        ORDER BY score DESC
+        LIMIT 10
+        """
+        return self.run_query(pagerank_query)
 
     def close(self):
         self.driver.close()
@@ -163,5 +214,19 @@ if neo4j_manager.driver:
     print("\nHost Similarity Analysis:")
     for record in graph_statistics["host_similarity_analysis"]:
         print(f" - Host ID 1: {record['host_id1']}, Host ID 2: {record['host_id2']}, Similarity: {record['similarity']}")
+
+    # Fetch Community Detection
+    communities = neo4j_manager.detect_communities()
+
+    print("Communities (Top 10):")
+    for record in communities:
+        print(f" - {record['user_name']} belongs to community {record['communityId']}")
+
+    # Fetch PageRank
+    pageRank_results = neo4j_manager.get_pageRank()
+
+    print("PageRank (Top 10):")
+    for record in pageRank_results:
+        print(f" - {record['name']}: {record['pageRank']}")
 
     neo4j_manager.close()
