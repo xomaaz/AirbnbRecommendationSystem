@@ -1,96 +1,167 @@
 from neo4j import GraphDatabase, basic_auth
 from neo4j.exceptions import ServiceUnavailable, AuthError
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
+import random
 
-# Function to create and return a Neo4j driver
-def connect_to_neo4j(uri, username, password):
-    try:
-        driver = GraphDatabase.driver(uri, auth=(username, password))
-        print("Connected to database")  # Confirm successful connection
-        return driver
-    except ServiceUnavailable:
-        print("Failed to connect to Neo4j. Is the database running?")
-        return None
-    except AuthError:
-        print("Authentication error. Please check your username and password.")
-        return None
-    except Exception as e:
-        print("An error occurred:", str(e))
-        return None
+# Constants for Neo4j database connection
+NEO4J_URI = "bolt://localhost:7687"  # Update with your Neo4j URI
+NEO4J_USERNAME = "neo4j"
+NEO4J_PASSWORD = "12345678"
 
-# Function to run a Cypher query and return results
-def run_query(driver, query):
-    with driver.session() as session:
-        result = session.run(query)
-        return [record for record in result]
+# Class to interact with Neo4j
+class Neo4jManager:
 
-# Function to fetch basic graph statistics
-def fetch_graph_statistics(driver):
-    # Get total number of nodes
-    total_nodes_query = "MATCH (n) RETURN count(n) AS total_nodes"
-    total_nodes = run_query(driver, total_nodes_query)[0]['total_nodes']
+    def __init__(self, uri, username, password):
+        self.uri = uri
+        self.username = username
+        self.password = password
+        self.driver = self.connect_to_neo4j()
 
-    # Get total number of relationships/edges
-    total_relationships_query = "MATCH ()-[r]-() RETURN count(r) AS total_relationships"
-    total_relationships = run_query(driver, total_relationships_query)[0]['total_relationships']
+    # Function to create and return a Neo4j driver
+    def connect_to_neo4j(self):
+        try:
+            driver = GraphDatabase.driver(
+                self.uri, auth=(self.username, self.password))
+            print("Connected to Neo4j database")
+            return driver
+        except ServiceUnavailable:
+            print("Failed to connect to Neo4j. Is the database running?")
+            return None
+        except AuthError:
+            print("Authentication error. Please check your credentials.")
+            return None
+        except Exception as e:
+            print("An error occurred:", str(e))
+            return None
 
-    # Get number of isolated nodes
-    isolated_nodes_query = "MATCH (n) WHERE NOT (n)--() RETURN count(n) AS isolated_nodes"
-    isolated_nodes = run_query(driver, isolated_nodes_query)[0]['isolated_nodes']
+    # Function to run a Cypher query and return results
+    def run_query(self, query, parameters=None):
+        with self.driver.session() as session:
+            result = session.run(query, parameters)
+            return [record for record in result]
 
-    # Get number of nodes by type
-    nodes_by_type_query = "MATCH (n) RETURN labels(n)[0] AS node_type, count(n) AS count"
-    nodes_by_type = run_query(driver, nodes_by_type_query)
+    # Fetch basic graph statistics including additional queries
+    def fetch_graph_statistics(self):
+        # Queries for various statistics
+        total_nodes_query = "MATCH (n) RETURN count(n) AS total_nodes"
+        total_relationships_query = "MATCH ()-[r]-() RETURN count(r) AS total_relationships"
+        isolated_nodes_query = "MATCH (n) WHERE NOT (n)--() RETURN count(n) AS isolated_nodes"
+        nodes_by_label_query = "MATCH (n) UNWIND labels(n) AS label RETURN label, count(n) AS count"
+        relationships_by_type_query = "MATCH ()-[r]-() RETURN type(r) AS relationship_type, count(r) AS count"
 
-    # Get total hosts
-    total_hosts_query = "MATCH (h:Host) RETURN count(h) AS total_hosts"
-    total_hosts = run_query(driver, total_hosts_query)[0]['total_hosts']
+        # Additional queries for statistics
+        most_common_amenities_query = """
+        MATCH (a:Amenity)<-[:HAS]-(l:Listing)
+        RETURN a.name AS amenity, COUNT(l) AS num_listings
+        ORDER BY num_listings DESC
+        LIMIT 5
+        """
 
-    # Get total listings
-    total_listings_query = "MATCH (l:Listing) RETURN count(l) AS total_listings"
-    total_listings = run_query(driver, total_listings_query)[0]['total_listings']
+        average_price_by_property_type_query = """
+        MATCH (l:Listing)
+        RETURN l.property_type AS property_type, AVG(l.price) AS avg_price
+        ORDER BY avg_price DESC
+        """
 
-    # Get superhost count
-    superhosts_count_query = "MATCH (h:Host) WHERE h.host_is_superhost = true RETURN count(h) AS superhosts_count"
-    superhosts_count = run_query(driver, superhosts_count_query)[0]['superhosts_count']
+        top_hosts_by_num_listings_query = """
+        MATCH (h:Host)-[:HOSTS]->(l:Listing)
+        RETURN h.host_name AS host_name, COUNT(l) AS num_listings
+        ORDER BY num_listings DESC
+        LIMIT 10
+        """
 
-    # Get max listings per host
-    max_listings_per_host_query = "MATCH (h:Host)-[:HOSTS]->(l:Listing) RETURN count(l) AS count ORDER BY count DESC LIMIT 1"
-    max_listings_per_host = run_query(driver, max_listings_per_host_query)[0]['count']
+        geospatial_analysis_query = """
+        MATCH (l:Listing)
+        WHERE point.distance(point({latitude: l.latitude, longitude: l.longitude}), point({latitude: 30.2672, longitude: -97.7431})) < 5000
+        RETURN l.name AS listing_name, l.latitude AS latitude, l.longitude AS longitude
+        """
 
-    # Return collected statistics
-    return {
-        "total_nodes": total_nodes,
-        "total_relationships": total_relationships,
-        "isolated_nodes": isolated_nodes,
-        "nodes_by_type": nodes_by_type,
-        "total_hosts": total_hosts,
-        "total_listings": total_listings,
-        "superhosts_count": superhosts_count,
-        "max_listings_per_host": max_listings_per_host,
-    }
+        host_similarity_analysis_query = """
+        MATCH (h1:Host)-[:HOSTS]->(l:Listing)-[:HAS]->(a:Amenity)
+        WITH h1, COLLECT(DISTINCT a.name) AS amenities
+        MATCH (h2:Host)-[:HOSTS]->(l2:Listing)-[:HAS]->(a2:Amenity)
+        WHERE h1 <> h2
+        WITH h1, h2, COUNT(DISTINCT a2) AS common_amenities, SIZE(amenities) AS total_amenities
+        RETURN h1.host_id AS host_id1, h2.host_id AS host_id2, common_amenities / toFloat(total_amenities) AS similarity
+        ORDER BY similarity DESC
+        LIMIT 10
+        """
 
-# Main script
-uri = "bolt://localhost:7687"  # Update with your Neo4j URI
-username = "neo4j"
-password = "Prettyflacko1"
+        # Get statistics
+        total_nodes = self.run_query(total_nodes_query)[0]["total_nodes"]
+        total_relationships = self.run_query(total_relationships_query)[0]["total_relationships"]
+        isolated_nodes = self.run_query(isolated_nodes_query)[0]["isolated_nodes"]
+        nodes_by_label = self.run_query(nodes_by_label_query)
+        relationships_by_type = self.run_query(relationships_by_type_query)
 
-driver = connect_to_neo4j(uri, username, password)
+        # Additional statistics
+        most_common_amenities = self.run_query(most_common_amenities_query)
+        average_price_by_property_type = self.run_query(average_price_by_property_type_query)
+        top_hosts_by_num_listings = self.run_query(top_hosts_by_num_listings_query)
+        geospatial_analysis = self.run_query(geospatial_analysis_query)
+        host_similarity_analysis = self.run_query(host_similarity_analysis_query)
 
-if driver:  # Only proceed if the connection was successful
-    graph_statistics = fetch_graph_statistics(driver)
+        # Return collected statistics
+        return {
+            "total_nodes": total_nodes,
+            "total_relationships": total_relationships,
+            "isolated_nodes": isolated_nodes,
+            "nodes_by_label": nodes_by_label,
+            "relationships_by_type": relationships_by_type,
+            "most_common_amenities": most_common_amenities,
+            "average_price_by_property_type": average_price_by_property_type,
+            "top_hosts_by_num_listings": top_hosts_by_num_listings,
+            "geospatial_analysis": geospatial_analysis,
+            "host_similarity_analysis": host_similarity_analysis,
+        }
 
-    print("Total nodes in the graph:", graph_statistics["total_nodes"])
-    print("Total relationships in the graph:", graph_statistics["total_relationships"])
-    print("Total isolated nodes in the graph:", graph_statistics["isolated_nodes"])
+    def close(self):
+        self.driver.close()
 
-    print("Nodes by type:")
-    for record in graph_statistics["nodes_by_type"]:
-        print(f" - {record['node_type']}: {record['count']}")
+# Initialize the Neo4j manager with connection details
+neo4j_manager = Neo4jManager(NEO4J_URI, NEO4J_USERNAME, NEO4J_PASSWORD)
 
-    print("Total hosts in the graph:", graph_statistics["total_hosts"])
-    print("Total listings in the graph:", graph_statistics["total_listings"])
-    print("Total superhosts in the graph:", graph_statistics["superhosts_count"])
+if neo4j_manager.driver:
+    # Fetch basic graph statistics including additional statistics
+    graph_statistics = neo4j_manager.fetch_graph_statistics()
 
-    print("Max listings by a single host:", graph_statistics["max_listings_per_host"])
+    # Print basic graph statistics
+    print("Graph Statistics:")
+    print("Total nodes:", graph_statistics["total_nodes"])
+    print("Total relationships:", graph_statistics["total_relationships"])
+    print("Isolated nodes:", graph_statistics["isolated_nodes"])
 
-    driver.close()  # Close the database connection
+    print("Node Distribution by Label:")
+    for record in graph_statistics["nodes_by_label"]:
+        print(f" - {record['label']}: {record['count']} nodes")
+
+    print("Relationships by Type:")
+    for record in graph_statistics["relationships_by_type"]:
+        print(f" - {record['relationship_type']}: {record['count']} relationships")
+
+    # Print additional statistics
+    print("\nAdditional Statistics:")
+    print("Most Common Amenities:")
+    for record in graph_statistics["most_common_amenities"]:
+        print(f" - Amenity: {record['amenity']}, Number of Listings: {record['num_listings']}")
+
+    print("\nAverage Listing Price by Property Type:")
+    for record in graph_statistics["average_price_by_property_type"]:
+        print(f" - Property Type: {record['property_type']}, Average Price: {record['avg_price']}")
+
+    print("\nTop Hosts by Number of Listings:")
+    for record in graph_statistics["top_hosts_by_num_listings"]:
+        print(f" - Host: {record['host_name']}, Number of Listings: {record['num_listings']}")
+
+    print("\nGeospatial Analysis for Location-Based Recommendations:")
+    for record in graph_statistics["geospatial_analysis"]:
+        print(f" - Listing Name: {record['listing_name']}, Latitude: {record['latitude']}, Longitude: {record['longitude']}")
+
+    print("\nHost Similarity Analysis:")
+    for record in graph_statistics["host_similarity_analysis"]:
+        print(f" - Host ID 1: {record['host_id1']}, Host ID 2: {record['host_id2']}, Similarity: {record['similarity']}")
+
+    neo4j_manager.close()
